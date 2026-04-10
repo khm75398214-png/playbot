@@ -29,7 +29,7 @@ db = firestore.client()
 # ======================================
 KST = timezone(timedelta(hours=9))
 
-ADMIN_USERS = ["가오니", "가오니2"]   # 관리자 닉네임
+ADMIN_USERS = ["가오니", "가오니2", "자동응답이"]   # 관리자 닉네임
 ALLOWED_ROOMS = []  # 비워두면 전체 방 허용, 제한하려면 ["테스트방", "AT클랜"] 이런 식
 
 CHAT_EXP_MIN = 2
