@@ -32,16 +32,17 @@ KST = timezone(timedelta(hours=9))
 ADMIN_USERS = ["가오니", "가오니2"]
 ALLOWED_ROOMS = []
 
-CHAT_EXP_MIN = 2
-CHAT_EXP_MAX = 5
-ATTENDANCE_EXP = 30
-ATTENDANCE_POINTS = 100
-MIN_MSG_LENGTH_FOR_EXP = 2
-CHAT_EXP_COOLDOWN_SEC = 20
+DEFAULT_CONFIG = {
+    "hunt_cooldown": 30,
+    "fish_cooldown": 25,
+    "mine_cooldown": 25,
+    "attendance_points": 100,
+    "attendance_exp": 30,
+    "chat_exp_min": 2,
+    "chat_exp_max": 5
+}
 
-HUNT_COOLDOWN_SEC = 30
-FISH_COOLDOWN_SEC = 25
-MINE_COOLDOWN_SEC = 25
+MIN_MSG_LENGTH_FOR_EXP = 2
 
 ITEM_DROP_TABLE = [
     {"name": "낡은 검", "type": "weapon", "grade": "common", "chance": 30},
@@ -72,8 +73,8 @@ MINE_TABLE = [
 SHOP_ITEMS = {
     "회복약": {"price": 120, "type": "consumable", "desc": "나중에 확장용 아이템"},
     "강화서": {"price": 300, "type": "consumable", "desc": "강화용 특수 아이템"},
-    "낚싯대": {"price": 500, "type": "tool", "desc": "낚시 성공 기분상 상승"},
-    "곡괭이": {"price": 500, "type": "tool", "desc": "광산 채굴 기분상 상승"},
+    "낚싯대": {"price": 500, "type": "tool", "desc": "낚시용 도구"},
+    "곡괭이": {"price": 500, "type": "tool", "desc": "광산용 도구"},
 }
 
 GRADE_BONUS = {
@@ -125,6 +126,32 @@ def user_doc_id(room, sender):
 
 def get_user_ref(room, sender):
     return db.collection("users").document(user_doc_id(room, sender))
+
+
+def get_config_ref(room):
+    return db.collection("room_config").document(room)
+
+
+def get_room_config(room):
+    ref = get_config_ref(room)
+    doc = ref.get()
+
+    if not doc.exists:
+        ref.set(DEFAULT_CONFIG)
+        return DEFAULT_CONFIG.copy()
+
+    data = doc.to_dict()
+    changed = False
+
+    for key, value in DEFAULT_CONFIG.items():
+        if key not in data:
+            data[key] = value
+            changed = True
+
+    if changed:
+        ref.set(data, merge=True)
+
+    return data
 
 
 def exp_needed(level):
@@ -189,15 +216,16 @@ def ensure_user(room, sender):
         return data, ref
 
     data = doc.to_dict()
-
     changed = False
+
     if "inventory" not in data:
         data["inventory"] = []
         changed = True
     if "equipment" not in data:
         data["equipment"] = make_empty_equipment()
         changed = True
-    for key in ["last_hunt_at", "last_fish_at", "last_mine_at"]:
+
+    for key in ["last_hunt_at", "last_fish_at", "last_mine_at", "last_chat_exp_at"]:
         if key not in data:
             data[key] = 0
             changed = True
@@ -208,18 +236,10 @@ def ensure_user(room, sender):
     return data, ref
 
 
-def add_points(room, sender, amount):
-    user_data, ref = ensure_user(room, sender)
-    new_points = int(user_data.get("points", 0)) + int(amount)
-    ref.update({"points": new_points})
-    user_data["points"] = new_points
-    return user_data
-
-
-def can_gain_chat_exp(user_data):
+def can_gain_chat_exp(user_data, cooldown_sec):
     now_ts = int(now_kst().timestamp())
     last_ts = int(user_data.get("last_chat_exp_at", 0))
-    return (now_ts - last_ts) >= CHAT_EXP_COOLDOWN_SEC
+    return (now_ts - last_ts) >= cooldown_sec
 
 
 def process_chat_exp(room, sender, msg):
@@ -229,12 +249,17 @@ def process_chat_exp(room, sender, msg):
     if len(msg.strip()) < MIN_MSG_LENGTH_FOR_EXP:
         return None
 
+    config = get_room_config(room)
+    chat_exp_min = int(config["chat_exp_min"])
+    chat_exp_max = int(config["chat_exp_max"])
+    chat_cooldown = 20
+
     user_data, ref = ensure_user(room, sender)
 
-    if not can_gain_chat_exp(user_data):
+    if not can_gain_chat_exp(user_data, chat_cooldown):
         return None
 
-    gained_exp = random.randint(CHAT_EXP_MIN, CHAT_EXP_MAX)
+    gained_exp = random.randint(chat_exp_min, chat_exp_max)
     old_level = int(user_data.get("level", 1))
     new_total_exp = int(user_data.get("total_exp", 0)) + gained_exp
     new_messages = int(user_data.get("messages", 0)) + 1
@@ -259,6 +284,7 @@ def process_chat_exp(room, sender, msg):
             f"Lv.{old_level} → Lv.{user_data['level']}\n"
             f"현재 경험치: {user_data['exp']} / {exp_needed(user_data['level'])}"
         )
+
     return None
 
 
@@ -300,13 +326,6 @@ def add_item_to_inventory(user_data, ref, item):
     inventory.append(item)
     user_data["inventory"] = inventory
     ref.update({"inventory": inventory})
-
-
-def remove_item_by_id(user_data, ref, item_id):
-    inventory = user_data.get("inventory", [])
-    new_inventory = [item for item in inventory if item.get("id") != item_id]
-    user_data["inventory"] = new_inventory
-    ref.update({"inventory": new_inventory})
 
 
 def format_item(item):
@@ -513,6 +532,7 @@ def bot():
             return jsonify({"reply": ""})
 
         ensure_user(room, sender)
+        get_room_config(room)
 
         reply = ""
 
@@ -541,6 +561,18 @@ def bot():
         elif msg == "!관리자목록":
             reply = "👑 관리자 목록\n" + "\n".join(ADMIN_USERS)
 
+        elif msg == "!서버설정":
+            config = get_room_config(room)
+            reply = (
+                f"⚙ 현재 방 설정\n"
+                f"사냥 쿨타임: {config['hunt_cooldown']}초\n"
+                f"낚시 쿨타임: {config['fish_cooldown']}초\n"
+                f"광산 쿨타임: {config['mine_cooldown']}초\n"
+                f"출석 포인트: {config['attendance_points']}\n"
+                f"출석 경험치: {config['attendance_exp']}\n"
+                f"채팅 경험치: {config['chat_exp_min']}~{config['chat_exp_max']}"
+            )
+
         elif msg == "!레벨":
             user_data, _ = ensure_user(room, sender)
             level = int(user_data.get("level", 1))
@@ -563,6 +595,7 @@ def bot():
             reply = f"💰 {sender}님의 포인트: {int(user_data.get('points', 0))}"
 
         elif msg == "!출석":
+            config = get_room_config(room)
             user_data, ref = ensure_user(room, sender)
             today = today_str()
             last_attendance = user_data.get("last_attendance", "")
@@ -570,8 +603,8 @@ def bot():
             if last_attendance == today:
                 reply = f"📌 {sender}님 오늘 이미 출석했어!"
             else:
-                new_points = int(user_data.get("points", 0)) + ATTENDANCE_POINTS
-                new_total_exp = int(user_data.get("total_exp", 0)) + ATTENDANCE_EXP
+                new_points = int(user_data.get("points", 0)) + int(config["attendance_points"])
+                new_total_exp = int(user_data.get("total_exp", 0)) + int(config["attendance_exp"])
                 old_level = int(user_data.get("level", 1))
 
                 user_data["points"] = new_points
@@ -587,7 +620,11 @@ def bot():
                     "last_attendance": today
                 })
 
-                reply = f"✅ {sender}님 출석 완료!\n+{ATTENDANCE_POINTS} 포인트\n+{ATTENDANCE_EXP} 경험치"
+                reply = (
+                    f"✅ {sender}님 출석 완료!\n"
+                    f"+{config['attendance_points']} 포인트\n"
+                    f"+{config['attendance_exp']} 경험치"
+                )
                 if user_data["level"] > old_level:
                     reply += f"\n🎉 레벨업! Lv.{old_level} → Lv.{user_data['level']}"
 
@@ -612,7 +649,9 @@ def bot():
             else:
                 lines = ["🏆 랭킹 TOP 10"]
                 for i, user in enumerate(users[:10], start=1):
-                    lines.append(f"{i}. {user['sender']} | Lv.{user['level']} | 전투력 {user['power']} | 💰 {user['points']}")
+                    lines.append(
+                        f"{i}. {user['sender']} | Lv.{user['level']} | 전투력 {user['power']} | 💰 {user['points']}"
+                    )
                 reply = "\n".join(lines)
 
         elif msg.startswith("!송금 "):
@@ -643,9 +682,6 @@ def bot():
                 except ValueError:
                     reply = "숫자를 올바르게 입력해줘."
 
-        # =========================
-        # RPG / 장비
-        # =========================
         elif msg == "!인벤토리":
             user_data, _ = ensure_user(room, sender)
             inventory = user_data.get("inventory", [])
@@ -682,7 +718,7 @@ def bot():
             else:
                 try:
                     idx = int(parts[1]) - 1
-                    ok, message = equip_item_by_index(user_data, ref, idx)
+                    _, message = equip_item_by_index(user_data, ref, idx)
                     reply = message
                 except ValueError:
                     reply = "번호를 올바르게 입력해줘."
@@ -692,17 +728,19 @@ def bot():
             slot_word = msg.replace("!장착해제 ", "").strip()
 
             if slot_word == "무기":
-                ok, message = unequip_slot(user_data, ref, "weapon")
+                _, message = unequip_slot(user_data, ref, "weapon")
                 reply = message
             elif slot_word == "방어구":
-                ok, message = unequip_slot(user_data, ref, "armor")
+                _, message = unequip_slot(user_data, ref, "armor")
                 reply = message
             else:
                 reply = "사용법: !장착해제 무기/방어구"
 
         elif msg == "!사냥":
+            config = get_room_config(room)
             user_data, ref = ensure_user(room, sender)
-            ok, remain = use_activity_cooldown(user_data, ref, "last_hunt_at", HUNT_COOLDOWN_SEC)
+            ok, remain = use_activity_cooldown(user_data, ref, "last_hunt_at", int(config["hunt_cooldown"]))
+
             if not ok:
                 reply = f"⏳ 사냥은 조금 쉬었다가 해줘. {remain}초 남음"
             else:
@@ -802,12 +840,10 @@ def bot():
                         ref.update({"points": new_points, "equipment": equipment})
                         reply = f"💥 강화 대실패...\n방어구가 파괴됐어.\n사용 포인트: {cost}"
 
-        # =========================
-        # 채집
-        # =========================
         elif msg == "!낚시":
+            config = get_room_config(room)
             user_data, ref = ensure_user(room, sender)
-            ok, remain = use_activity_cooldown(user_data, ref, "last_fish_at", FISH_COOLDOWN_SEC)
+            ok, remain = use_activity_cooldown(user_data, ref, "last_fish_at", int(config["fish_cooldown"]))
 
             if not ok:
                 reply = f"⏳ 낚시는 조금 쉬었다가 해줘. {remain}초 남음"
@@ -842,8 +878,9 @@ def bot():
                     reply += f"\n🎉 레벨업! Lv.{old_level} → Lv.{user_data['level']}"
 
         elif msg == "!광산":
+            config = get_room_config(room)
             user_data, ref = ensure_user(room, sender)
-            ok, remain = use_activity_cooldown(user_data, ref, "last_mine_at", MINE_COOLDOWN_SEC)
+            ok, remain = use_activity_cooldown(user_data, ref, "last_mine_at", int(config["mine_cooldown"]))
 
             if not ok:
                 reply = f"⏳ 광산은 조금 쉬었다가 해줘. {remain}초 남음"
@@ -877,9 +914,6 @@ def bot():
                 if user_data["level"] > old_level:
                     reply += f"\n🎉 레벨업! Lv.{old_level} → Lv.{user_data['level']}"
 
-        # =========================
-        # 상점 / 판매
-        # =========================
         elif msg == "!상점":
             lines = ["🛒 상점"]
             for name, info in SHOP_ITEMS.items():
@@ -956,9 +990,6 @@ def bot():
                 except ValueError:
                     reply = "번호를 올바르게 입력해줘."
 
-        # =========================
-        # 놀이
-        # =========================
         elif msg == "!주사위":
             reply = f"🎲 주사위 결과: {random.randint(1, 6)}"
 
@@ -1018,9 +1049,6 @@ def bot():
             items = ["꽝", "꽝", "소소한 행운", "간식 당첨", "대박 당첨", "완전 럭키"]
             reply = f"🎁 뽑기 결과: {random.choice(items)}"
 
-        # =========================
-        # 관리자
-        # =========================
         elif msg.startswith("!레벨추가 "):
             if not is_admin(sender):
                 reply = "⛔ 관리자만 사용할 수 있어."
@@ -1099,6 +1127,121 @@ def bot():
                             new_points = int(target_data.get("points", 0)) + add_points_num
                             target_ref.update({"points": new_points})
                             reply = f"💰 {target_name}님에게 {add_points_num} 포인트 지급!\n현재 포인트: {new_points}"
+                    except ValueError:
+                        reply = "숫자를 올바르게 입력해줘."
+
+        elif msg.startswith("!사냥쿨 "):
+            if not is_admin(sender):
+                reply = "⛔ 관리자만 사용할 수 있어."
+            else:
+                parts = msg.split()
+                if len(parts) != 2:
+                    reply = "사용법: !사냥쿨 초"
+                else:
+                    try:
+                        sec = int(parts[1])
+                        if sec < 0:
+                            reply = "0 이상의 숫자만 가능해."
+                        else:
+                            get_config_ref(room).set({"hunt_cooldown": sec}, merge=True)
+                            reply = f"⚙ 사냥 쿨타임이 {sec}초로 변경됐어."
+                    except ValueError:
+                        reply = "숫자를 올바르게 입력해줘."
+
+        elif msg.startswith("!낚시쿨 "):
+            if not is_admin(sender):
+                reply = "⛔ 관리자만 사용할 수 있어."
+            else:
+                parts = msg.split()
+                if len(parts) != 2:
+                    reply = "사용법: !낚시쿨 초"
+                else:
+                    try:
+                        sec = int(parts[1])
+                        if sec < 0:
+                            reply = "0 이상의 숫자만 가능해."
+                        else:
+                            get_config_ref(room).set({"fish_cooldown": sec}, merge=True)
+                            reply = f"⚙ 낚시 쿨타임이 {sec}초로 변경됐어."
+                    except ValueError:
+                        reply = "숫자를 올바르게 입력해줘."
+
+        elif msg.startswith("!광산쿨 "):
+            if not is_admin(sender):
+                reply = "⛔ 관리자만 사용할 수 있어."
+            else:
+                parts = msg.split()
+                if len(parts) != 2:
+                    reply = "사용법: !광산쿨 초"
+                else:
+                    try:
+                        sec = int(parts[1])
+                        if sec < 0:
+                            reply = "0 이상의 숫자만 가능해."
+                        else:
+                            get_config_ref(room).set({"mine_cooldown": sec}, merge=True)
+                            reply = f"⚙ 광산 쿨타임이 {sec}초로 변경됐어."
+                    except ValueError:
+                        reply = "숫자를 올바르게 입력해줘."
+
+        elif msg.startswith("!출석포인트 "):
+            if not is_admin(sender):
+                reply = "⛔ 관리자만 사용할 수 있어."
+            else:
+                parts = msg.split()
+                if len(parts) != 2:
+                    reply = "사용법: !출석포인트 숫자"
+                else:
+                    try:
+                        value = int(parts[1])
+                        if value < 0:
+                            reply = "0 이상의 숫자만 가능해."
+                        else:
+                            get_config_ref(room).set({"attendance_points": value}, merge=True)
+                            reply = f"⚙ 출석 포인트가 {value}로 변경됐어."
+                    except ValueError:
+                        reply = "숫자를 올바르게 입력해줘."
+
+        elif msg.startswith("!출석경험치 "):
+            if not is_admin(sender):
+                reply = "⛔ 관리자만 사용할 수 있어."
+            else:
+                parts = msg.split()
+                if len(parts) != 2:
+                    reply = "사용법: !출석경험치 숫자"
+                else:
+                    try:
+                        value = int(parts[1])
+                        if value < 0:
+                            reply = "0 이상의 숫자만 가능해."
+                        else:
+                            get_config_ref(room).set({"attendance_exp": value}, merge=True)
+                            reply = f"⚙ 출석 경험치가 {value}로 변경됐어."
+                    except ValueError:
+                        reply = "숫자를 올바르게 입력해줘."
+
+        elif msg.startswith("!채팅경험치 "):
+            if not is_admin(sender):
+                reply = "⛔ 관리자만 사용할 수 있어."
+            else:
+                parts = msg.split()
+                if len(parts) != 3:
+                    reply = "사용법: !채팅경험치 최소 최대"
+                else:
+                    try:
+                        min_exp = int(parts[1])
+                        max_exp = int(parts[2])
+
+                        if min_exp < 0 or max_exp < 0:
+                            reply = "0 이상의 숫자만 가능해."
+                        elif min_exp > max_exp:
+                            reply = "최소값이 최대값보다 클 수 없어."
+                        else:
+                            get_config_ref(room).set({
+                                "chat_exp_min": min_exp,
+                                "chat_exp_max": max_exp
+                            }, merge=True)
+                            reply = f"⚙ 채팅 경험치가 {min_exp}~{max_exp}로 변경됐어."
                     except ValueError:
                         reply = "숫자를 올바르게 입력해줘."
 
