@@ -29,7 +29,7 @@ db = firestore.client()
 # ======================================
 KST = timezone(timedelta(hours=9))
 
-ADMIN_USERS = ["가오니", "가오니2"]
+ADMIN_USERS = ["나", "가오니2"]
 ALLOWED_ROOMS = []
 
 DEFAULT_CONFIG = {
