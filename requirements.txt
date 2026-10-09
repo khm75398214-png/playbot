@@ -1,3 +1,27 @@
-Flask==3.0.3
-firebase-admin==6.5.0
-gunicorn==22.0.0
+import os
+from flask import Flask, request, jsonify
+
+app = Flask(__name__)
+
+AUTH_CODE = os.environ.get("BOT_AUTH_CODE")
+
+@app.route("/bot", methods=["POST"])
+def bot():
+    if not AUTH_CODE:
+        return jsonify({"error": "서버 인증 설정이 없습니다."}), 500
+
+    auth = request.headers.get("X-Auth-Code", "")
+
+    if auth != AUTH_CODE:
+        return jsonify({"error": "인증 실패"}), 401
+
+    data = request.get_json(silent=True) or {}
+    command = data.get("command", "")
+
+    if command == "!테스트":
+        return jsonify({"message": "인증 성공! 서버 연결 완료!"})
+
+    return jsonify({"message": "알 수 없는 명령어"})
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
